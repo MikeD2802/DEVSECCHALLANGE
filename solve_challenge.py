@@ -131,6 +131,12 @@ def parse_cli(argv: Sequence[str]) -> argparse.Namespace:
         help="Skip the POST request and only print the ordered indices.",
     )
     parser.add_argument(
+        "--token",
+        help=(
+            "Token to use alongside --items when the GET request cannot be performed."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print additional diagnostic information to stderr.",
@@ -143,13 +149,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.items:
         items = json.loads(args.items)
-        token = ""
+        token = args.token or ""
     else:
         try:
             fetch_started = time.monotonic()
             items, token = fetch_challenge(args.base_url)
+        except urllib.error.HTTPError as exc:
+            message = (
+                "Failed to fetch challenge data: HTTP "
+                f"{exc.code} {exc.reason}. "
+                "If outbound HTTPS is blocked, run the manual curl workflow and "
+                "relaunch this script with --items and --token."
+            )
+            print(message, file=sys.stderr)
+            return 1
         except (urllib.error.URLError, TimeoutError) as exc:
-            print(f"Failed to fetch challenge data: {exc}", file=sys.stderr)
+            print(
+                "Failed to fetch challenge data: "
+                f"{exc}. If outbound HTTPS is blocked, run the manual curl "
+                "workflow and relaunch this script with --items and --token.",
+                file=sys.stderr,
+            )
             return 1
         if args.verbose:
             elapsed_ms = (time.monotonic() - fetch_started) * 1000

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 
@@ -37,3 +38,44 @@ def test_determine_order_raises_for_unknown_entry():
     items.append("Extra")
     with pytest.raises(ValueError):
         solver.determine_order(items)
+
+
+def test_main_submits_with_manual_items(monkeypatch, capsys):
+    sample_items = [
+        "LLM06 Excessive Agency",
+        "LLM01 Prompt Injection",
+        "LLM08 Vector and Embedding Weaknesses",
+        "LLM04 Data Model Poisoning",
+        "LLM03 Supply Chain",
+        "LLM05 Improper Output Handling",
+        "LLM02 Sensitive Information Disclosure",
+        "LLM09 Misinformation",
+        "LLM07 System Prompt Leakage",
+        "LLM10 Unbounded Consumption",
+    ]
+    sample_token = "abc123"
+    expected_order = solver.determine_order(sample_items)
+
+    captured = {}
+
+    def fake_submit(url, ordered_list, token):
+        captured["args"] = (url, list(ordered_list), token)
+        return {"success": True, "echo": ordered_list}
+
+    monkeypatch.setattr(solver, "submit_solution", fake_submit)
+
+    exit_code = solver.main(
+        [
+            "--items",
+            json.dumps(sample_items),
+            "--token",
+            sample_token,
+            "--base-url",
+            "https://example.test/api",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["args"] == ("https://example.test/api", expected_order, sample_token)
+    printed = capsys.readouterr().out
+    assert '"success": true' in printed.lower()

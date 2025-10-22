@@ -14,9 +14,32 @@ python solve_challenge.py
 - `--items` – provide a JSON array of items to order instead of fetching from the live API.
 - `--base-url` – override the challenge endpoint (e.g., when running against a mock server).
 - `--verbose` – print timing information for the network requests.
+- `--token` – submit data supplied via `--items` without performing the GET request.
 
 Example dry run:
 
 ```bash
 python solve_challenge.py --no-submit --items '["LLM02 Sensitive Information Disclosure", "LLM01 Prompt Injection"]'
 ```
+
+### Manual fallback when outbound HTTPS is blocked
+
+Some environments block the direct GET request. You can still automate the
+solution submission by following these steps:
+
+1. Fetch the raw payload manually:
+
+   ```bash
+   curl -s https://challenge.devseccon.com/api/challenge
+   ```
+
+2. Copy the returned `items` array and `token`.
+
+3. Run the solver with the captured data so it can compute the ordered list and
+   submit it on your behalf:
+
+   ```bash
+   python solve_challenge.py --items '[copied array here]' --token copied_token_here
+   ```
+
+   Use `--no-submit` if you only want to inspect the computed ordering.
