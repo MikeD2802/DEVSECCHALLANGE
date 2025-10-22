@@ -23,9 +23,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import List, Sequence
+from typing import Any, List, Sequence
+from urllib.parse import quote, urlsplit, urlunsplit
 
 API_URL = "https://challenge.devseccon.com/api/challenge"
+TIMEOUT_SECONDS = 2.5
 
 # Synonyms for each canonical position.  We include both the official title and
 # a few common aliases to increase our chances of matching the API's wording.
@@ -95,23 +97,103 @@ def determine_order(items: Sequence[str]) -> List[int]:
     return ordered_indices
 
 
-def fetch_challenge(url: str) -> tuple[List[str], str]:
+def open_with_timeout(
+    request: urllib.request.Request,
+    opener: urllib.request.OpenerDirector,
+) -> Any:
+    """Open *request* with the configured opener using the global timeout."""
+
+    return opener.open(request, timeout=TIMEOUT_SECONDS)
+
+
+def fetch_challenge(
+    url: str, opener: urllib.request.OpenerDirector
+) -> tuple[List[str], str]:
     """Fetch the shuffled items and fast-expiring token."""
 
     request = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(request, timeout=2.5) as response:
+    with open_with_timeout(request, opener) as response:
         payload = json.load(response)
     return list(payload["items"]), str(payload["token"])
 
 
-def submit_solution(url: str, ordered_list: Sequence[int], token: str) -> dict:
+def submit_solution(
+    url: str,
+    ordered_list: Sequence[int],
+    token: str,
+    opener: urllib.request.OpenerDirector,
+) -> dict:
     """POST the ordered indices back to the challenge endpoint."""
 
     body = json.dumps({"orderedList": ordered_list, "token": token}).encode()
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=2.5) as response:
+    with open_with_timeout(request, opener) as response:
         return json.load(response)
+
+
+def redact_proxy(proxy_url: str) -> str:
+    """Return a version of *proxy_url* with credentials stripped."""
+
+    parts = urlsplit(proxy_url)
+    if not (parts.username or parts.password):
+        return proxy_url
+
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
+def prepare_proxy_url(
+    proxy_url: str, username: str | None, password: str | None
+) -> str:
+    """Inject optional credentials into *proxy_url* if provided."""
+
+    parts = urlsplit(proxy_url)
+    if parts.scheme not in {"http", "https"}:
+        raise ValueError("Proxy URL must start with http:// or https://")
+    if parts.username or parts.password:
+        if username or password:
+            raise ValueError(
+                "Proxy URL already contains credentials; do not combine with"
+                " --proxy-user/--proxy-password."
+            )
+        return proxy_url
+
+    if not (username or password):
+        return proxy_url
+
+    user = quote(username or "", safe="")
+    if password is None:
+        credentials = user
+    else:
+        credentials = f"{user}:{quote(password, safe='')}"
+
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+
+    netloc = f"{credentials}@{host}" if credentials else host
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def create_http_opener(
+    proxy_url: str | None,
+    *,
+    disable_proxy: bool = False,
+) -> urllib.request.OpenerDirector:
+    """Return an opener that honours proxy CLI settings."""
+
+    handlers: list[urllib.request.BaseHandler] = []
+    if disable_proxy:
+        handlers.append(urllib.request.ProxyHandler({}))
+    elif proxy_url:
+        handlers.append(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+
+    return urllib.request.build_opener(*handlers)
 
 
 def parse_cli(argv: Sequence[str]) -> argparse.Namespace:
@@ -136,6 +218,24 @@ def parse_cli(argv: Sequence[str]) -> argparse.Namespace:
             "Token to use alongside --items when the GET request cannot be performed."
         ),
     )
+    proxy_group = parser.add_argument_group("Proxy control")
+    proxy_group.add_argument(
+        "--proxy",
+        help="Override the proxy URL (e.g., http://user:pass@proxy:8080).",
+    )
+    proxy_group.add_argument(
+        "--proxy-user",
+        help="Username for the proxy supplied with --proxy.",
+    )
+    proxy_group.add_argument(
+        "--proxy-password",
+        help="Password for the proxy supplied with --proxy.",
+    )
+    proxy_group.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Disable environment proxy variables for the HTTP requests.",
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -147,13 +247,43 @@ def parse_cli(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_cli(sys.argv[1:] if argv is None else argv)
 
+    if args.proxy and args.no_proxy:
+        print("Cannot combine --proxy with --no-proxy", file=sys.stderr)
+        return 64
+    if (args.proxy_user or args.proxy_password) and not args.proxy:
+        print(
+            "Proxy credentials require --proxy to be set.",
+            file=sys.stderr,
+        )
+        return 64
+
+    proxy_url = args.proxy
+    if proxy_url and (args.proxy_user or args.proxy_password):
+        try:
+            proxy_url = prepare_proxy_url(proxy_url, args.proxy_user, args.proxy_password)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 64
+
+    try:
+        opener = create_http_opener(proxy_url, disable_proxy=args.no_proxy)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 64
+
+    if args.verbose:
+        if args.no_proxy:
+            print("Proxy usage disabled via --no-proxy", file=sys.stderr)
+        elif proxy_url:
+            print(f"Using proxy {redact_proxy(proxy_url)}", file=sys.stderr)
+
     if args.items:
         items = json.loads(args.items)
         token = args.token or ""
     else:
         try:
             fetch_started = time.monotonic()
-            items, token = fetch_challenge(args.base_url)
+            items, token = fetch_challenge(args.base_url, opener)
         except urllib.error.HTTPError as exc:
             message = (
                 "Failed to fetch challenge data: HTTP "
@@ -188,7 +318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        response = submit_solution(args.base_url, ordered_list, token)
+        response = submit_solution(args.base_url, ordered_list, token, opener)
     except (urllib.error.URLError, TimeoutError) as exc:
         print(f"Failed to submit solution: {exc}", file=sys.stderr)
         return 3

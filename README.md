@@ -13,6 +13,9 @@ python solve_challenge.py
 - `--no-submit` – compute the ordered list without performing the POST request. Useful when testing locally with sample data.
 - `--items` – provide a JSON array of items to order instead of fetching from the live API.
 - `--base-url` – override the challenge endpoint (e.g., when running against a mock server).
+- `--proxy` – override the proxy used for the HTTP requests (defaults to environment variables).
+- `--proxy-user` / `--proxy-password` – provide credentials for the proxy supplied to `--proxy`.
+- `--no-proxy` – ignore environment proxy settings and connect directly.
 - `--verbose` – print timing information for the network requests.
 - `--token` – submit data supplied via `--items` without performing the GET request.
 

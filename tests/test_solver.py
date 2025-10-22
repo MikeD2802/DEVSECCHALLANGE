@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+import urllib.request
 
 import pytest
 
@@ -58,11 +59,13 @@ def test_main_submits_with_manual_items(monkeypatch, capsys):
 
     captured = {}
 
-    def fake_submit(url, ordered_list, token):
-        captured["args"] = (url, list(ordered_list), token)
+    def fake_submit(url, ordered_list, token, opener):
+        captured["args"] = (url, list(ordered_list), token, opener)
         return {"success": True, "echo": ordered_list}
 
     monkeypatch.setattr(solver, "submit_solution", fake_submit)
+    dummy_opener = object()
+    monkeypatch.setattr(solver, "create_http_opener", lambda *a, **k: dummy_opener)
 
     exit_code = solver.main(
         [
@@ -76,6 +79,88 @@ def test_main_submits_with_manual_items(monkeypatch, capsys):
     )
 
     assert exit_code == 0
-    assert captured["args"] == ("https://example.test/api", expected_order, sample_token)
+    assert captured["args"] == (
+        "https://example.test/api",
+        expected_order,
+        sample_token,
+        dummy_opener,
+    )
     printed = capsys.readouterr().out
     assert '"success": true' in printed.lower()
+
+
+def test_prepare_proxy_url_injects_credentials():
+    proxy = solver.prepare_proxy_url("http://proxy.example:9000", "user", "pass word")
+    assert proxy == "http://user:pass%20word@proxy.example:9000"
+
+
+def test_prepare_proxy_url_rejects_duplicates():
+    with pytest.raises(ValueError):
+        solver.prepare_proxy_url("http://user:pw@proxy.example", "another", "creds")
+
+
+def test_create_http_opener_custom_proxy(monkeypatch):
+    recorded = {}
+
+    def fake_build_opener(*handlers):
+        recorded["handlers"] = handlers
+
+        class DummyOpener:
+            def open(self, request, timeout=0):  # pragma: no cover - network avoided
+                raise AssertionError("Network access not expected in test")
+
+        return DummyOpener()
+
+    monkeypatch.setattr(solver.urllib.request, "build_opener", fake_build_opener)
+
+    opener = solver.create_http_opener("http://proxy.example:8080")
+    assert opener  # opener is returned
+    assert len(recorded["handlers"]) == 1
+    handler = recorded["handlers"][0]
+    assert isinstance(handler, urllib.request.ProxyHandler)
+    assert handler.proxies == {
+        "http": "http://proxy.example:8080",
+        "https": "http://proxy.example:8080",
+    }
+
+
+def test_create_http_opener_disable_proxy(monkeypatch):
+    recorded = {}
+
+    def fake_build_opener(*handlers):
+        recorded["handlers"] = handlers
+
+        class DummyOpener:
+            def open(self, request, timeout=0):  # pragma: no cover - network avoided
+                raise AssertionError("Network access not expected in test")
+
+        return DummyOpener()
+
+    monkeypatch.setattr(solver.urllib.request, "build_opener", fake_build_opener)
+
+    solver.create_http_opener(None, disable_proxy=True)
+    assert len(recorded["handlers"]) == 1
+    handler = recorded["handlers"][0]
+    assert isinstance(handler, urllib.request.ProxyHandler)
+    assert handler.proxies == {}
+
+
+def test_main_rejects_proxy_credentials_without_proxy(monkeypatch, capsys):
+    monkeypatch.setattr(
+        solver,
+        "determine_order",
+        lambda items: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+    exit_code = solver.main(
+        [
+            "--items",
+            json.dumps([synonyms[0] for synonyms in solver.CANONICAL_SYNONYMS]),
+            "--token",
+            "tok",
+            "--proxy-user",
+            "user",
+        ]
+    )
+    assert exit_code == 64
+    captured = capsys.readouterr()
+    assert "Proxy credentials require --proxy" in captured.err
